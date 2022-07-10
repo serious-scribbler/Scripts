@@ -5,6 +5,7 @@ from rich.console import Console
 from rich.table import Table
 import os.path
 import sys
+import collections
 
 exts = {}
 console = Console()
@@ -30,7 +31,7 @@ def main():
             else:
                 exts[ext] = 1
     
-    for ext in exts:
+    for ext in collections.OrderedDict(sorted(exts.items())):
         table.add_row(ext, str(exts[ext]))
     
     console.print(table)
