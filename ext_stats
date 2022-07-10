@@ -1,0 +1,39 @@
+#!/usr/bin/python
+"""This script prints stats on the file extensions in a directory
+"""
+from rich.console import Console
+from rich.table import Table
+import os.path
+import sys
+
+exts = {}
+console = Console()
+
+table = Table(show_header=True, header_style="bold")
+table.add_column("[red]Extension[/red]", style="red")
+table.add_column("[blue]Files[/blue]", style="blue", justify="right")
+
+
+
+def main():
+    if len(sys.argv) != 2:
+        print("Usage: ext_stats.py <path to dir>")
+        exit(1)
+    
+    for path, directories, files in os.walk(sys.argv[1]):
+        for f in files:
+            #print(f)
+            ext = f.split(".")
+            ext = "None" if len(ext) < 2 else ext[-1]
+            if ext in exts:
+                exts[ext] += 1
+            else:
+                exts[ext] = 1
+    
+    for ext in exts:
+        table.add_row(ext, str(exts[ext]))
+    
+    console.print(table)
+
+if __name__ == "__main__":
+    main()
