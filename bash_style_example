@@ -1,0 +1,29 @@
+#/bin/bash
+RED='\033[0;31m'
+LIGHTRED='\033[1;31m'
+GREEN='\033[0;32m'
+LIGHTGREEN='\033[1;32m'
+CYAN='\033[0;36m'
+LIGHTCYAN='\033[1;36m'
+ORANGEBROWN='\033[m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+LIGHTBLUE='\033[1;34m'
+BLACK='\033[0;30m'
+DARKGRAY='\033[1;30m'
+PURPLE='\033[0;35m'
+LIGHTPURPLE='\033[1;35m'
+LIGHTGRAY='\033[0;37m'
+WHITE='\033[1;37m'
+
+BOLD='\033[1m'
+ITALIC='\033[3m'
+UNDERLINED='\033[4m'
+BLINKING='\033[5m'
+REVERSE='\033[7m'
+
+RST='\033[0m' # Reset style
+
+
+printf "${RED}Red text ${NOCOLOR}No Color ${CYAN}Cyan Text\n"
+printf "${BOLD}${LIGHTPURPLE}Bold light purple ${RST}${LIGHTGREEN}${BLINKING}Light green blinking${RST}\n"
