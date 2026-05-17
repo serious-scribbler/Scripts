@@ -1,0 +1,287 @@
+#!/usr/bin/env python3
+"""
+Enriched Context Generation: DNF Search Enricher (v2).
+
+This script parses the raw output of `dnf search` into a Pydantic internal 
+representation and provides flexible CLI options for filtering, formatting, 
+and exporting data.
+
+Dependencies: pydantic, rich, argparse, json
+"""
+
+from typing import List, Optional, Tuple, Dict, Any, Union
+from rich.console import Console
+from rich.table import Table
+from rich import box
+from rich.style import Style
+from rich.text import Text
+from pydantic import BaseModel, Field
+import subprocess
+import sys
+import argparse
+import json
+import re
+
+
+# ==============================================================================
+# 1. Internal Representation (Pydantic Schema)
+# ==============================================================================
+
+class DnfSearchEntry(BaseModel):
+    """
+    Represents a single row from the `dnf search` output.
+    
+    Attributes:
+        package: The name of the package (e.g., 'rofi.x86_64').
+        description: The summary or description associated with the package.
+        category: The matched field category used to determine styling 
+                  (e.g., 'name (exact)', 'summary', etc.). Defaults to 'summary'.
+    """
+    package: str = ""
+    description: str = ""
+    category: str = Field(default="summary", description="The matched field category.")
+
+
+# ==============================================================================
+# 2. Formatting Logic (Extensible Output Functions)
+# ==============================================================================
+
+def _get_style_for_category(category: str, plain: bool = False) -> Style:
+    """Maps the 'category' string to a Rich Style object."""
+    if plain:
+        return Style()
+
+    return Style(color="bright_red", bold=True)
+
+def _highlight_words(text: str, category: str, query: str, plain: bool = True) -> Text:
+    """
+    Finds occurrences of the search query and applies the category-specific
+    style exclusively to the matched substring.
+    """
+    if not text:
+        return Text("")
+        
+    rich_text = Text(text)
+    
+    if plain or not query:
+        return rich_text
+
+    style = _get_style_for_category(category, plain)
+    
+    # Case-insensitive match for the query
+    pattern = re.compile(re.escape(query), re.IGNORECASE)
+    
+    # Apply style to only the exact indices where the query matched
+    for match in pattern.finditer(text):
+        rich_text.stylize(style, match.start(), match.end())
+        
+    return rich_text
+
+def format_table(entries: List[DnfSearchEntry], query: str, hidden_count: int, 
+                 title: Optional[str] = None, plain: bool = False) -> Union[Table, str]:
+    """Formats a list of DnfSearchEntry objects into a Rich Table."""
+    if not entries and hidden_count == 0:
+        return "No matches found."
+
+    # Configure box style based on plain mode
+    table_box = None if plain else box.DOUBLE
+    
+    tbl = Table(title=title, box=table_box, show_edge=not plain)
+    
+    header_style = None if plain else "bold"
+    tbl.add_column("Package", style=header_style) 
+    tbl.add_column("Match Info") 
+
+    # Add footer if there are hidden matches
+    if hidden_count > 0:
+        caption_text = f"{hidden_count} matches on summary hidden, call with -a to show them"
+        if not plain:
+            caption_text = f"[italic dim]{caption_text}[/italic dim]"
+        tbl.caption = caption_text
+        tbl.caption_justify = "left"
+
+    # Group entries by their category to segment the table
+    grouped_entries: Dict[str, List[DnfSearchEntry]] = {}
+    for entry in entries:
+        if entry.category not in grouped_entries:
+            grouped_entries[entry.category] = []
+        grouped_entries[entry.category].append(entry)
+
+    for i, (category, cat_entries) in enumerate(grouped_entries.items()):
+        # Add visual separation between different categories
+        if i > 0:
+            if plain:
+                tbl.add_row("", "")  # Empty row instead of line section for plain text
+            else:
+                tbl.add_section()
+            
+        # Add the headline for the segment
+        if plain:
+            tbl.add_row(f"--- Matches on: {category.upper()} ---", "")
+        else:
+            tbl.add_row(f"[bold]Matches on:[/bold] [bold reverse] {category} [/bold reverse]", "")
+        
+        for entry in cat_entries:
+            styled_pkg = _highlight_words(entry.package, entry.category, query, plain)
+            styled_desc = _highlight_words(entry.description, entry.category, query, plain)
+            
+            tbl.add_row(styled_pkg, styled_desc)
+
+    return tbl
+
+
+def format_json(entries: List[DnfSearchEntry]) -> str:
+    """Formats the entries as pure JSON using Python's json module."""
+    data = [entry.model_dump() for entry in entries]
+    return json.dumps(data, indent=2)
+
+
+# ==============================================================================
+# 3. Parsing Logic (The "Brain")
+# ==============================================================================
+
+def _parse_dnf_output(text: str) -> List[DnfSearchEntry]:
+    """Parses the raw text output of `dnf search` into internal model."""
+    entries: List[DnfSearchEntry] = []
+    current_category: str = "summary"
+    
+    lines = text.splitlines()
+
+    for line in lines:
+        if not line.strip():
+            continue
+            
+        if line.startswith("Matched fields:"):
+            current_category = line.replace("Matched fields:", "").strip()
+            continue
+        
+        parts = line.split("\t", 1)
+        
+        if len(parts) == 2:
+            pkg_name, desc_text = parts[0].strip(), parts[1].strip()
+            entries.append(DnfSearchEntry(
+                package=pkg_name, 
+                description=desc_text, 
+                category=current_category
+            ))
+        elif len(parts) == 1:
+            pkg_name = parts[0].strip()
+            desc_text = "" 
+            entries.append(DnfSearchEntry(
+                package=pkg_name, 
+                description=desc_text, 
+                category=current_category
+            ))
+
+    return entries
+
+
+# ==============================================================================
+# 4. Filtering Logic (The "Smart" Layer)
+# ==============================================================================
+
+def _filter_entries(entries: List[DnfSearchEntry], show_all: bool = False) -> Tuple[List[DnfSearchEntry], int]:
+    """
+    Filters entries based on category count and the -a flag.
+    Returns a tuple of (filtered_list, count_of_hidden_summaries).
+    """
+    if not entries:
+        return [], 0
+    
+    category_counts: Dict[str, int] = {}
+    for entry in entries:
+        cat = entry.category
+        category_counts[cat] = category_counts.get(cat, 0) + 1
+    
+    threshold = 10
+    filtered_entries: List[DnfSearchEntry] = []
+    hidden_count = 0
+    
+    total_entries = len(entries)
+    unique_categories = len(category_counts)
+    
+    for entry in entries:
+        if show_all:
+            filtered_entries.append(entry)
+        else:
+            if entry.category == "summary":
+                # Show summary if total entries across ALL categories is <= 10
+                # OR if 'summary' is the only category that was found
+                if total_entries <= threshold or unique_categories == 1:
+                    filtered_entries.append(entry)
+                else:
+                    hidden_count += 1
+            else:
+                filtered_entries.append(entry)
+
+    return filtered_entries, hidden_count
+
+
+# ==============================================================================
+# 5. Library & CLI Orchestration
+# ==============================================================================
+
+def search_dnf(query: str) -> List[DnfSearchEntry]:
+    """Main library function to run `dnf search` and parse the output."""
+    try:
+        result = subprocess.run(
+            ["dnf", "search", query], 
+            capture_output=True, 
+            text=True, 
+            check=False
+        )
+        return _parse_dnf_output(result.stdout)
+    except FileNotFoundError:
+        print("Error: 'dnf' command not found. Ensure it is installed.")
+        sys.exit(1)
+
+
+def main():
+    """Entry point for running the script as a CLI tool."""
+    parser = argparse.ArgumentParser(
+        description="Parse and format `dnf search` output with Pydantic.",
+        epilog="Example: dnf-search rofi -a --json"
+    )
+    
+    parser.add_argument("query", type=str, nargs="?", default="rofi", 
+                        help="The string argument passed to dnf (default: 'rofi')")
+    
+    parser.add_argument("-a", "--all", action="store_true", 
+                        help="Show all entries regardless of category count")
+    
+    parser.add_argument("-j", "--json", action="store_true", 
+                        help="Output results as pure JSON instead of a Rich table")
+    
+    parser.add_argument("-p", "--plain", action="store_true", 
+                        help="Output plain text without table borders or colors")
+    
+    args = parser.parse_args()
+
+    # Get the internal representation
+    data = search_dnf(args.query)
+    
+    # Filter and retrieve the count of hidden items
+    filtered_data, hidden_count = _filter_entries(data, show_all=args.all)
+    
+    if not filtered_data and hidden_count == 0:
+        print("No matches found.")
+        sys.exit(0)
+
+    console = Console()
+    
+    if args.json:
+        output_str = format_json(filtered_data)
+        print(output_str)
+    else:
+        title = f"dnf search results for '{args.query}'"
+        console.print(format_table(
+            entries=filtered_data, 
+            query=args.query, 
+            hidden_count=hidden_count, 
+            title=title,
+            plain=args.plain
+        ))
+
+
+if __name__ == "__main__":
+    main()
